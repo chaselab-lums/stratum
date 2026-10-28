@@ -1,0 +1,10 @@
+ M Makefile
+ M README.md
+ M _codegen.py
+ M build/input.h
+ M build/main.c
+ M build/network.ll
+ M lower_cpu_linux.sh
+ M run.py
+ M weights.pt
+?? .venv/

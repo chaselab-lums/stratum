@@ -1,0 +1,7 @@
+torch
+torchvision
+snntorch
+tonic
+nir
+nirtorch
+snn-mlir

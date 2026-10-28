@@ -1,0 +1,7 @@
+{
+  "name": "inference-stats",
+  "cpu": "RiscvO3CPU",
+  "caches": true,
+  "max_insts": "",
+  "args": ""
+}

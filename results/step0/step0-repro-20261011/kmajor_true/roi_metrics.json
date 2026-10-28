@@ -1,0 +1,10 @@
+{
+  "simSeconds": 0.004423,
+  "simTicks": 4423373000.0,
+  "simInsts": 14970175.0,
+  "numCycles": 8846746.0,
+  "ipc": 1.692167,
+  "cpi": 0.590958,
+  "clk_period_ticks": 1000.0,
+  "sim_freq_hz": 1000000000000.0
+}

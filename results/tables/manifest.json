@@ -1,0 +1,12 @@
+{
+  "n_rows": 31,
+  "tasks": [
+    "step0",
+    "task1_phase",
+    "task3_l2",
+    "task3_width",
+    "task4_drawings",
+    "task5_synthetic",
+    "task6_determinism"
+  ]
+}

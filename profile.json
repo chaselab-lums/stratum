@@ -1,0 +1,6 @@
+{
+  "stats": "configs/profile/stats.json",
+  "o3pipe": "configs/profile/o3pipe.json",
+  "opt-compare": "configs/profile/opt-compare.json",
+  "sweep": "configs/profile/sweep.json"
+}

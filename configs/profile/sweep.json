@@ -1,0 +1,57 @@
+{
+  "title": "L2 size",
+  "description": "8-way L2. The empty args entry is the 4 MiB baseline.",
+  "charts": [
+    {
+      "field": "size_label",
+      "heading": "Achieved rate by L2 size",
+      "title": "L2 size, 8-way",
+      "caption": "The rate rises until the 2.3 MB fc1 weights fit. 4 MiB and 8 MiB match.",
+      "order": [
+        "512 KiB",
+        "1 MiB",
+        "2 MiB",
+        "4 MiB",
+        "8 MiB"
+      ]
+    }
+  ],
+  "points": [
+    {
+      "name": "l2-512KiB",
+      "label": "512 KiB, 8-way",
+      "size_label": "512 KiB",
+      "group": "size",
+      "args": "--l2_size 512KiB"
+    },
+    {
+      "name": "l2-1MiB",
+      "label": "1 MiB, 8-way",
+      "size_label": "1 MiB",
+      "group": "size",
+      "args": "--l2_size 1MiB"
+    },
+    {
+      "name": "l2-2MiB",
+      "label": "2 MiB, 8-way",
+      "size_label": "2 MiB",
+      "group": "size",
+      "args": "--l2_size 2MiB"
+    },
+    {
+      "name": "baseline",
+      "label": "4 MiB, 8-way",
+      "size_label": "4 MiB",
+      "group": "size",
+      "args": ""
+    },
+    {
+      "name": "l2-8MiB",
+      "label": "8 MiB, 8-way",
+      "size_label": "8 MiB",
+      "group": "size",
+      "args": "--l2_size 8MiB"
+    }
+  ],
+  "min_tick": 18000000000
+}

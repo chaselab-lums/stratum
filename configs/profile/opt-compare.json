@@ -1,0 +1,25 @@
+{
+  "root": "gem5/work/results/profiles/opt-compare",
+  "variants": [
+    {
+      "name": "baseline",
+      "label": "Dense MLIR (baseline)",
+      "note": "Scalar int8 matvec: lb/lb/lw/mul/sw every synapse"
+    },
+    {
+      "name": "sparse-int8",
+      "label": "Skip zeros (sparse int8)",
+      "note": "Index list of x[k]!=0; I += w (no mul by 0/1)"
+    },
+    {
+      "name": "bitpack-dense",
+      "label": "Bit-packed x (dense scan)",
+      "note": "Pack spikes to bits; still test every k"
+    },
+    {
+      "name": "bitpack-sparse",
+      "label": "Bit-packed x + set bits",
+      "note": "Pack spikes; walk set bits with ctz"
+    }
+  ]
+}

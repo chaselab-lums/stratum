@@ -1,0 +1,49 @@
+# Python / tooling
+.venv/
+.venv_eval/
+__pycache__/
+*.py[cod]
+.Python
+
+# IDE / local
+.vscode/
+.cursor/
+.nested-repos-backup/
+cache/
+data/
+
+# gem5
+gem5/build/
+gem5/work/
+m5out/
+
+# snnMNIST (regenerate via run.py / Makefile)
+snnMNIST/build/
+snnMNIST/cache/
+snnMNIST/data/
+snnMNIST/.venv/
+
+# snn-mlir (build locally)
+snn-mlir/build/
+snn-mlir/.local/
+
+# Experiment outputs (regenerate via results/run_experiments.py)
+results/runs/
+results/claude_export/
+results/claude_export.zip
+results/*.log
+results/**/*.nohup
+results/**/gem5_console.log
+results/step0/**/gem5/
+results/step0/**/sim.elf
+results/step0/**/network.ll
+results/step0/**/network.mlir
+results/step0/**/input.h
+results/ir/
+results/plots/
+
+# Secrets
+.env
+.env.*
+*.pem
+*credentials*

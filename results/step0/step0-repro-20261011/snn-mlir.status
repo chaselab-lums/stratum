@@ -1,0 +1,4 @@
+ M include/SNN/Conversion/Passes.td
+ M lib/Conversion/SNNToLinalg/SNNToLinalg.cpp
+ M test/Dialect/SNN/lower_linear_skip_zeros.mlir
+?? .local

@@ -1,0 +1,10 @@
+{
+  "name": "pipeline-detail",
+  "cpu": "RiscvO3CPU",
+  "caches": true,
+  "debug_flags": "O3PipeView",
+  "debug_file": "trace.out",
+  "cycles_into_roi": 2000,
+  "window_cycles": 400,
+  "stats": "gem5/work/results/profiles/stats/inference-stats/stats.txt"
+}

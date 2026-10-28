@@ -1,0 +1,467 @@
+# Copyright 2026 N Vision Systems And Technologies SL
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+"""C runtime code generation for a NIR graph.
+
+Turns a model folder (exactly one ``*.nir`` + an ``input.csv`` or ``input.npy``)
+into a ``build/`` directory holding everything a compiler needs for the CPU
+reference:
+
+    network.mlir   SNN-dialect MLIR (weights baked in as constant globals)
+    snn_data.h     layer-size macros
+    input.h        the input sequence, baked from the input file (int8 L0_input)
+    main.c         timestep-loop driver that prints one CSV row per step
+
+``codegen_folder`` is the folder-level entry point the CLI drives; ``run`` (the
+compile-and-execute verb) reuses it before invoking the toolchain.
+"""
+
+from pathlib import Path
+
+import numpy as np
+
+from ._api import export as export_mlir
+from ._api import parse_graph, quantize_layers
+from ._cname import ensure_unique_c_names
+from ._graph import GraphInfo, as_graph_info
+from .nodes import NeuronInfo, NodeInfo
+
+
+def codegen_folder(
+    folder: "str | Path",
+    *,
+    quantize: bool = False,
+    index_bits: int = 64,
+) -> Path:
+    """Emit ``<folder>/build/`` from a model folder.
+
+    The folder must hold exactly one ``*.nir`` and one input file — ``input.csv``
+    or ``input.npy``. ``n_steps`` is taken from the number of rows/frames in the
+    input; its per-frame feature count must match the network's input size.
+
+    Returns the path to the generated ``build/`` directory.
+    """
+    folder = Path(folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"folder not found: {folder}")
+
+    nir_path = _find_single_nir(folder)
+    input_path = _find_single_input(folder)
+
+    layers = parse_graph(nir_path)
+    ensure_unique_c_names(layers)
+    if quantize:
+        quantize_layers(layers)
+
+    # The entry rule, not layers[0]: a recurrent graph's order starts with the
+    # recurrent synapse, whose width is NOT the network input width.
+    input_size = layers.input_size
+    output_size = layers.output_size
+
+    build = folder / "build"
+    build.mkdir(parents=True, exist_ok=True)
+
+    n_steps = write_input_header(input_path, build, expected_cols=input_size)
+    export_mlir(nir_path, build / "network.mlir", quantize=quantize)
+    generate_snn_header(layers, input_size, output_size, n_steps, build)
+    generate_main_c(layers, input_size, output_size, n_steps, build, quantize, index_bits)
+    return build
+
+
+def _find_single_nir(folder: Path) -> Path:
+    matches = sorted(folder.glob("*.nir"))
+    if not matches:
+        raise FileNotFoundError(f"no .nir file found in {folder}")
+    if len(matches) > 1:
+        names = ", ".join(p.name for p in matches)
+        raise ValueError(f"multiple .nir files found in {folder} ({names}); expected exactly one")
+    return matches[0]
+
+
+def _find_single_input(folder: Path) -> Path:
+    matches = [p for p in (folder / "input.csv", folder / "input.npy") if p.is_file()]
+    if not matches:
+        raise FileNotFoundError(f"no input.csv or input.npy found in {folder}")
+    if len(matches) > 1:
+        raise ValueError(f"both input.csv and input.npy found in {folder}; expected exactly one")
+    return matches[0]
+
+
+def _load_frames(input_path: Path) -> np.ndarray:
+    """Load an input file as a 2-D int array ``[n_steps, n_features]``.
+
+    ``.csv`` is parsed as one row per timestep. ``.npy`` follows the same shape
+    rules the streamed-input tooling uses: 1-D is rejected (the step vs feature
+    axis is ambiguous), and rank 3+ is flattened to ``[n_steps, -1]`` — axis 0 is
+    always the step axis, and a conv model reshapes the flat row back through its
+    input memref. The baked ``L0_input`` is ``int8``, so fractional values are
+    rejected (quantize first).
+    """
+    if input_path.suffix != ".npy":
+        return np.loadtxt(input_path, delimiter=",", dtype=np.int64, ndmin=2)
+
+    arr = np.load(input_path)
+    if arr.ndim == 1:
+        raise ValueError(
+            f"{input_path.name} is 1-D (shape {arr.shape}); the timestep vs feature "
+            f"axis is ambiguous — reshape to 2-D [n_steps, n_features] "
+            f"([1, N] for a single frame)."
+        )
+    if arr.ndim > 2:
+        flat = arr.reshape(arr.shape[0], -1)
+        print(
+            f"[snn-mlir] {input_path.name} is {arr.ndim}-D {arr.shape}; flattening "
+            f"trailing axes -> {flat.shape} (axis 0 = timesteps)."
+        )
+        arr = flat
+    if not np.all(np.equal(np.mod(arr, 1), 0)):
+        raise ValueError(
+            f"{input_path.name} has fractional values; the baked input is int8 "
+            f"(quantize before export)."
+        )
+    return arr.astype(np.int64)
+
+
+def write_input_header(
+    input_path: "str | Path",
+    output_dir: "str | Path",
+    *,
+    expected_cols: "int | None" = None,
+) -> int:
+    """Bake an input file into ``output_dir/input.h`` (``int8_t L0_input[N][C]``).
+
+    ``input_path`` is an ``input.csv`` (one row per timestep) or an ``input.npy``
+    (2-D ``[n_steps, n_features]``, or higher-rank flattened per
+    :func:`_load_frames`). Returns the number of rows ``N`` (= ``n_steps``).
+    Raises if the per-frame feature count does not match ``expected_cols``.
+    """
+    input_path = Path(input_path)
+    arr = _load_frames(input_path)
+    n_steps, n_cols = arr.shape
+    if expected_cols is not None and n_cols != expected_cols:
+        raise ValueError(
+            f"{input_path.name} has {n_cols} columns but the network expects {expected_cols} inputs"
+        )
+
+    lines = [
+        "/* Auto-generated by snn-mlir — do NOT edit */",
+        "#ifndef INPUT_H",
+        "#define INPUT_H",
+        "",
+        "#include <stdint.h>",
+        "",
+        f"int8_t L0_input[{n_steps}][{n_cols}] = {{",
+    ]
+    for row in arr:
+        lines.append("    {" + ",".join(str(int(v)) for v in row) + "},")
+    lines += ["};", "", "#endif /* INPUT_H */"]
+    Path(output_dir, "input.h").write_text("\n".join(lines) + "\n")
+    return n_steps
+
+
+def generate_snn_header(
+    layers: "list[NodeInfo] | GraphInfo",
+    input_size: int,
+    output_size: int,
+    n_steps: int,
+    output_path: Path,
+) -> None:
+    """Write snn_data.h — layer-size macros only (weights live in network.mlir)."""
+    lines = [
+        "/* Auto-generated by snn-mlir — do NOT edit */",
+        "#ifndef SNN_DATA_H",
+        "#define SNN_DATA_H",
+        "",
+        "#include <stdint.h>",
+        "",
+        f"#define N_STEPS      {n_steps}",
+        f"#define INPUT_SIZE   {input_size}",
+        f"#define OUTPUT_SIZE  {output_size}",
+        "",
+    ]
+    for layer in layers:
+        if isinstance(layer, NeuronInfo):
+            lines.append(f"#define {layer.state_size_define} {layer.state_size}")
+    lines += [
+        "",
+        "/* Weights live as constant globals inside network.mlir, not here. */",
+        "",
+        "#endif /* SNN_DATA_H */",
+    ]
+    (output_path / "snn_data.h").write_text("\n".join(lines) + "\n")
+
+
+def generate_main_c(
+    layers: "list[NodeInfo] | GraphInfo",
+    input_size: int,
+    output_size: int,
+    n_steps: int,
+    output_path: Path,
+    quantize: bool,
+    index_bits: int = 64,
+) -> None:
+    """Write main.c test harness (timestep loop, memref descriptors).
+
+    For a recurrent graph, the harness owns one zero-initialized
+    previous-spikes buffer per recurrent neuron and passes it per the
+    positional argument-order contract in ``_emit``'s module docstring
+    (immediately after that neuron's own state buffers). The kernel reads and
+    refreshes it; zero at t=0 means "no spikes before the first timestep".
+    """
+    graph = as_graph_info(layers)
+    recurrent_neurons = {neuron for neuron, _synapse in graph.recurrent_edges}
+    idx_t = f"int{index_bits}_t"
+    L: list[str] = []
+
+    L.append("/* Auto-generated by snn-mlir — do NOT edit */")
+    L.append("#include <stdio.h>")
+    L.append("#include <stdint.h>")
+    L.append('#include "snn_data.h"')
+    L.append('#include "input.h"')
+    L.append("")
+
+    # ── memref descriptor typedefs + constructors (shape-driven) ──────────────
+    descriptors = _descriptor_types(graph, quantize)
+    L.append(f"/* MLIR memref descriptors ({index_bits}-bit index) */")
+    for rank, ctype in descriptors:
+        L += _memref_typedef(_desc_name(rank, ctype), ctype, rank, idx_t)
+    L.append("")
+
+    # ── extern function declaration ───────────────────────────────────────────
+    L += _extern_signature(graph, idx_t, quantize)
+    L.append("")
+
+    # ── helper constructors ───────────────────────────────────────────────────
+    for rank, ctype in descriptors:
+        L += _maker_def(rank, ctype, idx_t)
+    L.append("")
+
+    # ── main ──────────────────────────────────────────────────────────────────
+    L.append("int main(void) {")
+
+    last_neuron = next((layer for layer in reversed(layers) if isinstance(layer, NeuronInfo)), None)
+    input_shape = graph.input_shape
+    in_rank = len(input_shape)
+    out_ctype = _out_ctype(last_neuron, quantize)
+    out_shape = last_neuron.out_shape if last_neuron else (output_size,)
+    out_rank = len(out_shape)
+
+    if not quantize:
+        L.append("    float input_buf[INPUT_SIZE];")
+    L.append(f"    {out_ctype} output_buf[OUTPUT_SIZE];")
+    L.append("")
+
+    # state arrays (+ one previous-spikes buffer per recurrent neuron)
+    s_t = "int32_t" if quantize else "float"
+    spk_t = "int8_t" if quantize else "float"
+    for name in graph.order:
+        layer = graph.nodes[name]
+        if isinstance(layer, NeuronInfo):
+            for sname in layer.state_names:
+                L.append(
+                    f"    {s_t} {sname}_{layer.c_name}[{layer.state_size_define}] = {{0}};",
+                )
+        if name in recurrent_neurons:
+            L.append(
+                f"    {spk_t} prev_spikes_{layer.c_name}[{layer.state_size_define}] = {{0}};",
+            )
+    L.append("")
+
+    # static descriptors (shape follows the buffer: rank-3 for a conv feature map)
+    if not quantize:
+        L.append(
+            f"    {_desc_name(in_rank, 'float')} in_desc"
+            f" = {_mk_call(in_rank, 'float', 'input_buf', input_shape)};",
+        )
+    L.append(
+        f"    {_desc_name(out_rank, out_ctype)} out_desc"
+        f" = {_mk_call(out_rank, out_ctype, 'output_buf', out_shape)};",
+    )
+
+    # Weights are baked into network.mlir as constant globals — no descriptors here.
+
+    # state descriptors (+ previous-spikes descriptors, spike-typed)
+    s_ctype = "int32_t" if quantize else "float"
+    spk_ctype = "int8_t" if quantize else "float"
+    for name in graph.order:
+        layer = graph.nodes[name]
+        if isinstance(layer, NeuronInfo):
+            rank = len(layer.out_shape)
+            for sname in layer.state_names:
+                L.append(
+                    f"    {_desc_name(rank, s_ctype)} {sname[0]}{layer.c_name}_desc"
+                    f" = {_mk_call(rank, s_ctype, f'{sname}_{layer.c_name}', layer.out_shape)};",
+                )
+            if name in recurrent_neurons:
+                spk_buf = f"prev_spikes_{layer.c_name}"
+                L.append(
+                    f"    {_desc_name(rank, spk_ctype)} prev_{layer.c_name}_desc"
+                    f" = {_mk_call(rank, spk_ctype, spk_buf, layer.out_shape)};",
+                )
+    L.append("")
+
+    # timestep loop
+    L.append('    printf("CSV_START\\n");')
+    L.append(f"    for (int step = 0; step < {n_steps}; step++) {{")
+
+    if quantize:
+        desc = _desc_name(in_rank, "int8_t")
+        mk = _mk_call(in_rank, "int8_t", "(int8_t *)L0_input[step]", input_shape)
+        L.append(f"        {desc} in_desc = {mk};")
+    else:
+        L.append("        for (int i = 0; i < INPUT_SIZE; i++)")
+        L.append("            input_buf[i] = (float)L0_input[step][i];")
+    L.append("")
+
+    # build call args (the _emit positional ABI: states, then prev-spikes)
+    call_args = ["&in_desc"]
+    for name in graph.order:
+        layer = graph.nodes[name]
+        if isinstance(layer, NeuronInfo):
+            for sname in layer.state_names:
+                call_args.append(f"&{sname[0]}{layer.c_name}_desc")
+        if name in recurrent_neurons:
+            call_args.append(f"&prev_{layer.c_name}_desc")
+    call_args.append("&out_desc")
+
+    L.append("        _mlir_ciface_snn_forward_step(")
+    L.append("            " + ", ".join(call_args) + ");")
+    L.append("")
+
+    # print output
+    val_expr = "output_buf[i]" if quantize else "(int)output_buf[i]"
+    L.append("        for (int i = 0; i < OUTPUT_SIZE; i++) {")
+    L.append('            if (i > 0) printf(",");')
+    L.append(f'            printf("%d", {val_expr});')
+    L.append("        }")
+    L.append('        printf("\\n");')
+
+    L.append("    }")
+    L.append('    printf("CSV_END\\n");')
+    L.append("    return 0;")
+    L.append("}")
+
+    (output_path / "main.c").write_text("\n".join(L) + "\n")
+
+
+# ── memref descriptors (shape-driven) ───────────────────────────────────────────
+#
+# A descriptor's rank follows its buffer's shape: rank-1 for a dense layer,
+# rank-3 for a conv feature map. Names carry the rank so a model that mixes both
+# (a conv stem into a dense head) gets one typedef per (rank, element type).
+
+_CTAG = {"int8_t": "i8", "int32_t": "i32", "float": "f32"}
+
+
+def _desc_name(rank: int, ctype: str) -> str:
+    return f"Memref{rank}D{_CTAG[ctype]}"
+
+
+def _mk_name(rank: int, ctype: str) -> str:
+    return f"mk{rank}d_{_CTAG[ctype]}"
+
+
+def _maker_def(rank: int, ctype: str, idx_t: str) -> list[str]:
+    """A ``mk<rank>d_<tag>`` constructor for a contiguous row-major buffer."""
+    dims = [f"d{i}" for i in range(rank)]
+    strides = ["*".join(dims[i + 1 :]) or "1" for i in range(rank)]
+    desc, mk = _desc_name(rank, ctype), _mk_name(rank, ctype)
+    params = ", ".join(f"{idx_t} {d}" for d in dims)
+    return [
+        f"static {desc} {mk}({ctype} *p, {params}) {{",
+        f"    return ({desc}){{p, p, 0, {{{', '.join(dims)}}}, {{{', '.join(strides)}}}}};",
+        "}",
+    ]
+
+
+def _mk_call(rank: int, ctype: str, ptr: str, shape: "tuple[int, ...]") -> str:
+    dims = ", ".join(str(int(d)) for d in shape)
+    return f"{_mk_name(rank, ctype)}({ptr}, {dims})"
+
+
+def _out_ctype(last_neuron: "NodeInfo | None", quantize: bool) -> str:
+    if not quantize:
+        return "float"
+    if last_neuron and last_neuron.output_element_type(quantize) == "i32":
+        return "int32_t"
+    return "int8_t"
+
+
+def _descriptor_types(graph: GraphInfo, quantize: bool) -> list[tuple[int, str]]:
+    """The unique ``(rank, C element type)`` pairs the harness needs, in order.
+
+    One per network input, neuron state buffer, recurrent previous-spikes buffer
+    and network output. Deduplicated so each typedef/constructor is emitted once.
+    """
+    recurrent = {neuron for neuron, _synapse in graph.recurrent_edges}
+    in_ct = "int8_t" if quantize else "float"
+    s_ct = "int32_t" if quantize else "float"
+    spk_ct = "int8_t" if quantize else "float"
+    last_neuron = next((lay for lay in reversed(graph.layers) if isinstance(lay, NeuronInfo)), None)
+
+    pairs: list[tuple[int, str]] = [(len(graph.input_shape), in_ct)]
+    for name in graph.order:
+        layer = graph.nodes[name]
+        if isinstance(layer, NeuronInfo):
+            for _sname in layer.state_names:
+                pairs.append((len(layer.out_shape), s_ct))
+            if name in recurrent:
+                pairs.append((len(layer.out_shape), spk_ct))
+    if last_neuron is not None:
+        pairs.append((len(last_neuron.out_shape), _out_ctype(last_neuron, quantize)))
+
+    seen: list[tuple[int, str]] = []
+    for pair in pairs:
+        if pair not in seen:
+            seen.append(pair)
+    return seen
+
+
+# ── private helpers ────────────────────────────────────────────────────────────
+
+
+def _memref_typedef(name: str, elem_t: str, rank: int, idx_t: str) -> list[str]:
+    return [
+        "typedef struct {",
+        f"    {elem_t} *allocated;",
+        f"    {elem_t} *aligned;",
+        f"    {idx_t} offset;",
+        f"    {idx_t} sizes[{rank}];",
+        f"    {idx_t} strides[{rank}];",
+        f"}} {name};",
+    ]
+
+
+def _extern_signature(graph: GraphInfo, idx_t: str, quantize: bool) -> list[str]:
+    """The kernel's positional C ABI. Each pointer's descriptor rank matches its
+    buffer's shape (rank-3 for a conv feature map, rank-1 for a dense vector)."""
+    last_neuron = next(
+        (layer for layer in reversed(graph.layers) if isinstance(layer, NeuronInfo)), None
+    )
+    recurrent_neurons = {neuron for neuron, _synapse in graph.recurrent_edges}
+    s_ctype = "int32_t" if quantize else "float"
+    spk_ctype = "int8_t" if quantize else "float"
+    in_ctype = "int8_t" if quantize else "float"
+
+    in_t = _desc_name(len(graph.input_shape), in_ctype)
+    out_t = _desc_name(
+        len(last_neuron.out_shape) if last_neuron else 1,
+        _out_ctype(last_neuron, quantize),
+    )
+
+    # Weights are constant globals inside the module, not function arguments.
+    args = [f"{in_t} *input"]
+    for name in graph.order:
+        layer = graph.nodes[name]
+        if isinstance(layer, NeuronInfo):
+            rank = len(layer.out_shape)
+            for sname in layer.state_names:
+                args.append(f"{_desc_name(rank, s_ctype)} *{sname}_{layer.c_name}")
+            if name in recurrent_neurons:
+                args.append(f"{_desc_name(rank, spk_ctype)} *prev_spikes_{layer.c_name}")
+    args.append(f"{out_t} *output")
+
+    return [
+        "extern void _mlir_ciface_snn_forward_step(",
+        "    " + ",\n    ".join(args),
+        ");",
+    ]

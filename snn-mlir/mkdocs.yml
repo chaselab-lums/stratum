@@ -1,0 +1,72 @@
+# Copyright 2026 N Vision Systems And Technologies SL
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+site_name: SNN-MLIR
+site_description: An MLIR Dialect for Compiling Neuromorphic SNNs from NIR to Bare-Metal C
+site_url: https://snn-mlir.readthedocs.io/
+repo_url: https://github.com/INTERA-GROUP/snn-mlir
+repo_name: INTERA-GROUP/snn-mlir
+copyright: Copyright &copy; 2026 N Vision Systems And Technologies SL
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/icon.png
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+    - search.suggest
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - How it works: getting-started/how-it-works.md
+      - Installation: getting-started/installation.md
+      - Quick start: getting-started/quickstart.md
+      - Using the dialect in your project: getting-started/embedding.md
+  - SNN MLIR dialect:
+      - Overview & operations: dialect/overview.md
+      - Implementing a lowering pass: dialect/lowering-pass.md
+  - Python API (NIR parser):
+      - NIR mapping: python/nir-mapping.md
+      - Quantization: python/quantization.md
+      - Adding a NIR node type: python/nir-node.md
+      - API reference: python/api.md
+  - Examples:
+      - SNN Oxford (LAVA-DL): examples/snn-oxford.md
+      - SNNTorch: examples/snntorch.md
+      - BrailleNN (Norse): examples/brailernn.md
+      - N-MNIST CNN (Sinabs): examples/nmnistcnn.md
+  - Limitations: limitations.md
+  - Contributing: contributing.md
